@@ -89,12 +89,13 @@ pub fn matches_client_id(&self, client_id: &str) -> bool {
 
 ## Concurrency Behavior
 
-TokenBucket itself is not thread-safe (interior mutability not used). Thread safety is handled by the caller via `Arc<Mutex<Vec<TokenBucket>>>`:
+TokenBucket itself is not thread-safe (interior mutability not used). Thread safety is handled by the caller via `Arc<DashMap<String, TokenBucket>>`:
 
-- Multiple concurrent requests for the **same client** serialize at the Mutex (one request processes, others wait)
-- Requests for **different clients** access different buckets (no lock contention)
+- Requests for the **same client** are atomic (DashMap entry operation is atomic)
+- Requests for **different clients** access different buckets (fine-grained locking per shard)
+- **No lock contention** between clients (DashMap uses shard-based locking)
 
-**Trade-off:** Simple implementation, acceptable for typical rate-limiting scenarios (hundreds of clients, not thousands).
+**Trade-off:** Lock-free concurrent access with O(1) lookup by client_id. See [ADR-007](../decisions/ADR-007-dashmap-state-management.md) for detailed rationale.
 
 ## Edge Cases
 

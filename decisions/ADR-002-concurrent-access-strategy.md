@@ -1,8 +1,10 @@
 # ADR-002: Arc + Mutex for Concurrent State Management
 
-**Status:** Accepted  
+**Status:** Superseded by [ADR-007](./ADR-007-dashmap-state-management.md)  
 **Date:** 2026-08-05  
-**Author:** Rate Limiter Team
+**Author:** Rate Limiter Team  
+
+> **Note:** This ADR describes the original Arc<Mutex<Vec<TokenBucket>>> approach. The implementation has evolved to use Arc<DashMap<String, TokenBucket>> for better performance and scalability. See [ADR-007](./ADR-007-dashmap-state-management.md) for the current strategy and migration rationale.
 
 ## Context
 

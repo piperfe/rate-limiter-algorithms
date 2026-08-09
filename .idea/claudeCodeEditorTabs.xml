@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ClaudeCodeEditorTabs">
+    <option name="activeSessionId" value="5a81c262-0ccf-4331-a447-09a76afbe4dd" />
+    <option name="openSessionIds">
+      <list>
+        <option value="5f4d769a-5e26-4774-800c-f1d5a8f16d2f" />
+        <option value="5a81c262-0ccf-4331-a447-09a76afbe4dd" />
+      </list>
+    </option>
+    <option name="sessionPaths">
+      <map>
+        <entry key="5a81c262-0ccf-4331-a447-09a76afbe4dd" value="/sessions/573966ed-853f-4a3d-9184-c72d77685c2a" />
+        <entry key="5f4d769a-5e26-4774-800c-f1d5a8f16d2f" value="/sessions/96891b2b-a390-4a7d-856b-bf29d3b8f81e" />
+      </map>
+    </option>
+    <option name="sessionTitles">
+      <map>
+        <entry key="5a81c262-0ccf-4331-a447-09a76afbe4dd" value="why let response = server.get(&quot;/&quot;).add_header(&quot;X-A" />
+        <entry key="5f4d769a-5e26-4774-800c-f1d5a8f16d2f" value="how can I print the date and time of now fn is_all" />
+      </map>
+    </option>
+  </component>
+</project>

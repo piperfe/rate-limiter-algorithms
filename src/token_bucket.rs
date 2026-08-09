@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 pub struct TokenBucket {
-    client_id: String,
     capacity: u64,
     remaining_tokens: u64,
     refill_rate_per_second: u64,
@@ -14,18 +13,13 @@ pub struct AllowedTokenRequest {
 }
 
 impl TokenBucket {
-    pub fn new(client_id: String, capacity: u64, rate_per_second: u64) -> Self {
+    pub fn new(capacity: u64, rate_per_second: u64) -> Self {
         Self {
-            client_id,
             capacity,
             remaining_tokens: capacity,
             refill_rate_per_second: rate_per_second,
             last_request_date: Instant::now(),
         }
-    }
-
-    pub fn matches_client_id(&self, client_id: &str) -> bool {
-        self.client_id == client_id
     }
 
     pub fn is_allowed(&mut self) -> AllowedTokenRequest {
@@ -34,7 +28,9 @@ impl TokenBucket {
         let elapsed_seconds = now.duration_since(self.last_request_date).as_secs();
         let refilling_tokens = elapsed_seconds * self.refill_rate_per_second;
         let mut tokens_available = refilling_tokens + self.remaining_tokens;
-        if tokens_available > self.capacity { tokens_available = self.capacity; }
+        if tokens_available > self.capacity {
+            tokens_available = self.capacity;
+        }
 
         self.remaining_tokens = tokens_available;
         self.last_request_date = now;
@@ -58,24 +54,14 @@ impl TokenBucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn should_return_true_when_match_client_ids() {
-        let bucket = TokenBucket::new("client_id".to_string(), 1, 1);
-        assert_eq!(bucket.matches_client_id("client_id"), true);
-    }
+    use std::{sync::Mutex, thread, time::Duration};
 
-    #[test]
-    fn should_return_false_when_unmatch_client_ids() {
-        let bucket = TokenBucket::new("client_id".to_string(), 1, 1);
-        assert_eq!(bucket.matches_client_id("client_2"), false);
-    }
-
-    mod rate_limiting {
+    mod allow_deny {
         use super::*;
-        use std::{sync::Mutex, thread, time::Duration};
+
         #[test]
-        fn should_allowed_when_bucket_has_tokens() {
-            let mut bucket = TokenBucket::new("client_id".to_string(), 1, 1);
+        fn should_allow_request_when_tokens_available() {
+            let mut bucket = TokenBucket::new(1, 1);
             let response: AllowedTokenRequest = bucket.is_allowed();
 
             assert_eq!(response.allowed, true);
@@ -83,18 +69,22 @@ mod tests {
         }
 
         #[test]
-        fn should_deny_when_bucket_does_not_have_tokens() {
-            let mut bucket = TokenBucket::new("client_id".to_string(), 1, 1);
+        fn should_deny_request_when_tokens_exhausted() {
+            let mut bucket = TokenBucket::new(1, 1);
             bucket.is_allowed();
             let response = bucket.is_allowed();
 
             assert_eq!(response.allowed, false);
             assert_eq!(response.remaining_tokens, 0);
         }
+    }
+
+    mod refill_and_capacity {
+        use super::*;
 
         #[test]
-        fn should_refilled_bucket_when_2_seconds_passed() {
-            let mut bucket = TokenBucket::new("client_id".to_string(), 5, 2);
+        fn should_refill_tokens_after_elapsed_time() {
+            let mut bucket = TokenBucket::new(5, 2);
             bucket.is_allowed();
             bucket.is_allowed();
             bucket.is_allowed();
@@ -112,8 +102,8 @@ mod tests {
         }
 
         #[test]
-        fn should_do_not_refill_the_bucket_after_max_token_capacity() {
-            let mut bucket = TokenBucket::new("client_id".to_string(), 1, 1);
+        fn should_cap_tokens_at_capacity() {
+            let mut bucket = TokenBucket::new(1, 1);
             let response: AllowedTokenRequest = bucket.is_allowed();
 
             assert_eq!(response.allowed, true);
@@ -125,11 +115,14 @@ mod tests {
             assert_eq!(response1.allowed, true);
             assert_eq!(response1.remaining_tokens, 0);
         }
+    }
+
+    mod concurrency {
+        use super::*;
 
         #[test]
-        fn should_allowed_3_requests_and_deny_1_request_with_concurrent_requests()
-         {
-            let bucket = Mutex::new(TokenBucket::new("client".to_string(), 3, 1));
+        fn should_enforce_limit_under_concurrent_access() {
+            let bucket = Mutex::new(TokenBucket::new(3, 1));
 
             let requests: Vec<_> = std::thread::scope(|scope| {
                 let handles: Vec<_> = (0..4)

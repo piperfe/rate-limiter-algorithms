@@ -4,23 +4,17 @@ This document describes the two-tier testing approach: domain unit tests and end
 
 ## Test Structure
 
-```
-src/token_bucket.rs
-  ├─ #[cfg(test)] mod tests
-  │   ├─ Client Matching Tests
-  │   └─ mod rate_limiting (integration with TokenBucket logic)
-  │       ├─ Token Consumption
-  │       ├─ Token Refill
-  │       ├─ Capacity Overflow
-  │       └─ Concurrent Access
-  │
-src/web_server.rs
-  └─ #[cfg(test)] mod integration_tests
-      ├─ New Client Initialization
-      ├─ Sequential Requests
-      ├─ Rate Limit Denials
-      └─ Concurrent Multi-Client
-```
+Tests are organized into nested modules by business concept (see `src/token_bucket.rs:54-143` and `src/web_server.rs:95-326`):
+
+**Domain Tests** (`src/token_bucket.rs`):
+- `mod allow_deny` — Token consumption and denial scenarios
+- `mod refill_and_capacity` — Refill logic and capacity capping
+- `mod concurrency` — Thread-safe concurrent access
+
+**Endpoint Tests** (`src/web_server.rs`):
+- `mod configuration` — Environment variable and default configuration
+- `mod rate_limiting` — Token decrement and rate limit enforcement
+- `mod concurrency` — Concurrent load (single and multi-client)
 
 ## Domain Unit Tests (`src/token_bucket.rs`)
 
@@ -30,23 +24,20 @@ src/web_server.rs
 
 ### Test Categories
 
-#### Client Matching
-- `should_return_true_when_match_client_ids` — Verify `matches_client_id()` correctly identifies clients
-- `should_return_false_when_unmatch_client_ids` — Ensure different client IDs don't match
+See `src/token_bucket.rs:54-143` for implementation.
 
-#### Token Consumption
-- `should_allowed_when_bucket_has_tokens` — First request consumes one token
-- `should_deny_when_bucket_does_not_have_tokens` — Exhausted bucket denies requests
-- Verifies remaining tokens decrement correctly
+#### Allow / Deny (`mod allow_deny`)
+- `should_allow_request_when_tokens_available` — First request consumes one token
+- `should_deny_request_when_tokens_exhausted` — Exhausted bucket denies requests
 
-#### Token Refill
-- `should_refilled_bucket_when_2_seconds_passed` — Tokens accumulate after elapsed time
-- `should_do_not_refill_the_bucket_after_max_token_capacity` — Refill caps at capacity
+#### Refill & Capacity (`mod refill_and_capacity`)
+- `should_refill_tokens_after_elapsed_time` — Tokens accumulate after elapsed time
+- `should_cap_tokens_at_capacity` — Refill caps at capacity (no unbounded accumulation)
 
-#### Concurrency
-- `should_allowed_3_requests_and_deny_1_request_with_concurrent_requests` — Thread safety via Mutex
+#### Concurrency (`mod concurrency`)
+- `should_enforce_limit_under_concurrent_access` — Thread safety via Arc<DashMap>
   - Spawns 4 threads competing for 3 tokens
-  - Verifies exactly 1 is denied (serialized access)
+  - Verifies exactly 1 is denied (atomic access enforced)
 
 ## Endpoint Integration Tests (`src/web_server.rs`)
 
@@ -56,40 +47,22 @@ src/web_server.rs
 
 ### Test Categories
 
-#### New Client Initialization
+See `src/web_server.rs:95-326` for implementation.
 
-- `should_setting_the_bucket_for_new_users_using_env_vars` — Custom capacity via env vars
-  - Sets `BUCKET_CAPACITY=10`, verifies bucket created with 10 tokens
-  - First request consumes 1, leaving 9
+#### Configuration (`mod configuration`)
 
-- `should_setting_the_bucket_for_new_users_using_default_values` — Defaults when env unset
-  - No env vars set, verifies capacity defaults to 60
-  - First request leaves 59 remaining
+- `should_return_200_with_custom_capacity_from_env_vars` — Custom capacity via env vars (see line 105)
+- `should_return_200_with_default_capacity_for_new_client` — Defaults when env unset (see line 135)
 
-#### Sequential Requests
+#### Rate Limiting (`mod rate_limiting`)
 
-- `should_decreasing_requests_in_the_bucket_for_old_users` — Tokens decrement per request
-  - Makes 3 sequential requests for same client
-  - Verifies remaining tokens: 59 → 58 → 57
+- `should_return_200_with_decremented_tokens_on_repeat_request` — Sequential requests decrement tokens (see line 161)
+- `should_return_429_when_tokens_exhausted` — 429 returned when capacity exceeded (see line 191)
 
-#### Rate Limit Denials
+#### Concurrency (`mod concurrency`)
 
-- `should_deny_a_request` — 429 returned when bucket exhausted
-  - Makes 61 requests (exceeds default capacity of 60)
-  - Verifies 61st request returns 429
-  - Checks RateLimit header shows 0 remaining
-
-#### Concurrent Multi-Client
-
-- `should_accepting_and_denying_concurrent_requests_for_one_user` — Concurrent load on single client
-  - 119 concurrent requests for one client
-  - Verifies exactly 60 allowed, 59 denied
-
-- `should_accepting_and_denying_concurrent_requests_for_multiple_users` — Independent quotas
-  - 119 iterations, each spawning 2 requests (client_1 + client_2)
-  - Verifies client_1 has independent 60/59 split
-  - Verifies client_2 has independent 60/59 split
-  - Confirms no quota sharing between clients
+- `should_enforce_limit_correctly_under_concurrent_load_single_client` — Concurrent load on single client (see line 227)
+- `should_isolate_limits_between_concurrent_clients` — Independent per-client quotas (see line 255)
 
 ## Running Tests
 

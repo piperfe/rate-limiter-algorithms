@@ -7,8 +7,9 @@ use axum::{
     routing::get,
 };
 use axum_macros::FromRef;
+use dashmap::DashMap;
 use serde::Deserialize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Deserialize, Clone, Debug)]
 struct AppConfig {
@@ -27,11 +28,11 @@ fn default_bucket_rate() -> u64 {
 #[derive(Clone, FromRef)]
 struct AppState {
     config: AppConfig,
-    client_buckets: Arc<Mutex<Vec<TokenBucket>>>,
+    client_buckets: Arc<DashMap<String, TokenBucket>>,
 }
 
 pub fn create_routes() -> Router {
-    let client_buckets = Arc::new(Mutex::<Vec<TokenBucket>>::new(vec![]));
+    let client_buckets = Arc::new(DashMap::new());
     let app_config = envy::from_env::<AppConfig>()
         .expect("Boot Error: Required environment variables are missing or misconfigured!");
     println!("Server configuration loaded: {:?}", app_config);
@@ -45,34 +46,18 @@ pub fn create_routes() -> Router {
 }
 
 async fn rate_limit_handler(
-    State(client_buckets): State<Arc<Mutex<Vec<TokenBucket>>>>,
+    State(client_buckets): State<Arc<DashMap<String, TokenBucket>>>,
     State(config): State<AppConfig>,
     headers: HeaderMap,
 ) -> Response<Body> {
     let client_api_key = headers.get("X-Api-Key").unwrap().to_str().unwrap();
-    let mut client_buckets = client_buckets.lock().unwrap();
 
-    let known_client_optional = client_buckets
-        .iter_mut()
-        .find(|bucket| bucket.matches_client_id(client_api_key));
-
-    if known_client_optional.is_some() {
-        let known_client = known_client_optional.unwrap();
-        let response = known_client.is_allowed();
-
-        if !response.allowed {
-            return too_many_requests_response_builder(client_api_key);
-        }
-        return response_ok_builder(client_api_key, response.remaining_tokens);
-    }
-
-    let mut new_bucket = TokenBucket::new(
-        String::from(client_api_key),
-        config.bucket_capacity,
-        config.bucket_refill_rate_per_second,
-    );
-    let response = new_bucket.is_allowed();
-    client_buckets.push(new_bucket);
+    let mut client_bucket = client_buckets
+        .entry(client_api_key.to_string())
+        .or_insert_with(|| {
+            TokenBucket::new(config.bucket_capacity, config.bucket_refill_rate_per_second)
+        });
+    let response = client_bucket.is_allowed();
 
     if !response.allowed {
         return too_many_requests_response_builder(client_api_key);
@@ -113,11 +98,41 @@ mod integration_tests {
     use axum_test::TestServer;
     use temp_env;
 
-    #[tokio::test]
-    async fn should_setting_the_bucket_for_new_users_using_env_vars() {
-        let bucket_capacity = ("BUCKET_CAPACITY", Some("10"));
-        let bucket_refill_rate_per_second = ("BUCKET_REFILL_RATE_PER_SECOND", Some("1"));
-        temp_env::async_with_vars([bucket_capacity, bucket_refill_rate_per_second], (|| async {
+    mod configuration {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_return_200_with_custom_capacity_from_env_vars() {
+            let bucket_capacity = ("BUCKET_CAPACITY", Some("10"));
+            let bucket_refill_rate_per_second = ("BUCKET_REFILL_RATE_PER_SECOND", Some("1"));
+            temp_env::async_with_vars(
+                [bucket_capacity, bucket_refill_rate_per_second],
+                (|| async {
+                    let routes = create_routes();
+                    let server = TestServer::new(routes);
+
+                    let response = server
+                        .get("/rate-limit")
+                        .add_header("X-API-Key", "client_1")
+                        .await;
+
+                    assert_eq!(response.status_code(), 200);
+                    assert_eq!(response.text(), "Hello, World!");
+                    assert_eq!(
+                        response.header("RateLimit-Policy").to_str().unwrap(),
+                        "\"api-v1\";q=1;w=1"
+                    );
+                    assert_eq!(
+                        response.header("RateLimit").to_str().unwrap(),
+                        "\"api-v1\";r=9;t=1;pk=:client_1:"
+                    );
+                })(),
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn should_return_200_with_default_capacity_for_new_client() {
             let routes = create_routes();
             let server = TestServer::new(routes);
 
@@ -134,194 +149,180 @@ mod integration_tests {
             );
             assert_eq!(
                 response.header("RateLimit").to_str().unwrap(),
-                "\"api-v1\";r=9;t=1;pk=:client_1:"
+                "\"api-v1\";r=59;t=1;pk=:client_1:"
             );
-        })()).await;
+        }
     }
 
-    #[tokio::test]
-    async fn should_setting_the_bucket_for_new_users_using_default_values() {
-        let routes = create_routes();
-        let server = TestServer::new(routes);
+    mod rate_limiting {
+        use super::*;
 
-        let response = server
-            .get("/rate-limit")
-            .add_header("X-API-Key", "client_1")
-            .await;
+        #[tokio::test]
+        async fn should_return_200_with_decremented_tokens_on_repeat_request() {
+            let routes = create_routes();
+            let server = TestServer::new(routes);
 
-        assert_eq!(response.status_code(), 200);
-        assert_eq!(response.text(), "Hello, World!");
-        assert_eq!(
-            response.header("RateLimit-Policy").to_str().unwrap(),
-            "\"api-v1\";q=1;w=1"
-        );
-        assert_eq!(
-            response.header("RateLimit").to_str().unwrap(),
-            "\"api-v1\";r=59;t=1;pk=:client_1:"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_decreasing_requests_in_the_bucket_for_old_users() {
-        let routes = create_routes();
-        let server = TestServer::new(routes);
-
-        server
-            .get("/rate-limit")
-            .add_header("X-API-Key", "client_1")
-            .await;
-        server
-            .get("/rate-limit")
-            .add_header("X-API-Key", "client_1")
-            .await;
-        let response = server
-            .get("/rate-limit")
-            .add_header("X-API-Key", "client_1")
-            .await;
-
-        assert_eq!(response.status_code(), 200);
-        assert_eq!(response.text(), "Hello, World!");
-        assert_eq!(
-            response.header("RateLimit-Policy").to_str().unwrap(),
-            "\"api-v1\";q=1;w=1"
-        );
-        assert_eq!(
-            response.header("RateLimit").to_str().unwrap(),
-            "\"api-v1\";r=57;t=1;pk=:client_1:"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_deny_a_request() {
-        let routes = create_routes();
-        let server = TestServer::new(routes);
-        let mut responses = vec![];
-        let client_id = "client_1";
-
-        for _ in 0..=60 {
+            server
+                .get("/rate-limit")
+                .add_header("X-API-Key", "client_1")
+                .await;
+            server
+                .get("/rate-limit")
+                .add_header("X-API-Key", "client_1")
+                .await;
             let response = server
                 .get("/rate-limit")
-                .add_header("X-API-Key", client_id)
+                .add_header("X-API-Key", "client_1")
                 .await;
-            responses.push(response);
+
+            assert_eq!(response.status_code(), 200);
+            assert_eq!(response.text(), "Hello, World!");
+            assert_eq!(
+                response.header("RateLimit-Policy").to_str().unwrap(),
+                "\"api-v1\";q=1;w=1"
+            );
+            assert_eq!(
+                response.header("RateLimit").to_str().unwrap(),
+                "\"api-v1\";r=57;t=1;pk=:client_1:"
+            );
         }
 
-        let too_many_requests = &responses[60];
+        #[tokio::test]
+        async fn should_return_429_when_tokens_exhausted() {
+            let routes = create_routes();
+            let server = TestServer::new(routes);
+            let mut responses = vec![];
+            let client_id = "client_1";
 
-        assert_eq!(too_many_requests.status_code(), 429);
-        assert_eq!(too_many_requests.text(), "Too Many Requests");
-        assert_eq!(
-            too_many_requests
-                .header("RateLimit-Policy")
-                .to_str()
-                .unwrap(),
-            "\"api-v1\";q=1;w=1"
-        );
-        assert_eq!(
-            too_many_requests.header("RateLimit").to_str().unwrap(),
-            "\"api-v1\";r=0;t=1;pk=:client_1:"
-        );
+            for _ in 0..=60 {
+                let response = server
+                    .get("/rate-limit")
+                    .add_header("X-API-Key", client_id)
+                    .await;
+                responses.push(response);
+            }
+
+            let too_many_requests = &responses[60];
+
+            assert_eq!(too_many_requests.status_code(), 429);
+            assert_eq!(too_many_requests.text(), "Too Many Requests");
+            assert_eq!(
+                too_many_requests
+                    .header("RateLimit-Policy")
+                    .to_str()
+                    .unwrap(),
+                "\"api-v1\";q=1;w=1"
+            );
+            assert_eq!(
+                too_many_requests.header("RateLimit").to_str().unwrap(),
+                "\"api-v1\";r=0;t=1;pk=:client_1:"
+            );
+        }
     }
 
-    #[tokio::test]
-    async fn should_accepting_and_denying_concurrent_requests_for_one_user() {
-        let routes = create_routes();
-        let server = std::sync::Arc::new(TestServer::new(routes));
-        let handles: Vec<_> = (1..120)
-            .map(|_| {
-                let server = server.clone();
-                tokio::spawn(async move {
-                    server
-                        .get("/rate-limit")
-                        .add_header("X-API-Key", "client_1")
-                        .await
+    mod concurrency {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_enforce_limit_correctly_under_concurrent_load_single_client() {
+            let routes = create_routes();
+            let server = std::sync::Arc::new(TestServer::new(routes));
+            let handles: Vec<_> = (1..120)
+                .map(|_| {
+                    let server = server.clone();
+                    tokio::spawn(async move {
+                        server
+                            .get("/rate-limit")
+                            .add_header("X-API-Key", "client_1")
+                            .await
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        let results = futures::future::join_all(handles).await;
-        let status_200_count = results
-            .iter()
-            .filter(|response| response.as_ref().is_ok_and(|r| r.status_code() == 200))
-            .count();
+            let results = futures::future::join_all(handles).await;
+            let status_200_count = results
+                .iter()
+                .filter(|response| response.as_ref().is_ok_and(|r| r.status_code() == 200))
+                .count();
 
-        let status_429_count = results
-            .iter()
-            .filter(|response| response.as_ref().is_ok_and(|r| r.status_code() == 429))
-            .count();
-        assert_eq!(status_200_count, 60);
-        assert_eq!(status_429_count, 59);
-    }
+            let status_429_count = results
+                .iter()
+                .filter(|response| response.as_ref().is_ok_and(|r| r.status_code() == 429))
+                .count();
+            assert_eq!(status_200_count, 60);
+            assert_eq!(status_429_count, 59);
+        }
 
-    #[tokio::test]
-    async fn should_accepting_and_denying_concurrent_requests_for_multiple_users() {
-        let routes = create_routes();
-        let server = std::sync::Arc::new(TestServer::new(routes));
-        let handles: Vec<_> = (1..120)
-            .flat_map(|_| {
-                [
-                    tokio::spawn({
-                        let server = server.clone();
-                        async move {
-                            (
-                                "client_1",
-                                server
-                                    .get("/rate-limit")
-                                    .add_header("X-API-Key", "client_1")
-                                    .await,
-                            )
-                        }
-                    }),
-                    tokio::spawn({
-                        let server = server.clone();
-                        async move {
-                            (
-                                "client_2",
-                                server
-                                    .get("/rate-limit")
-                                    .add_header("X-API-Key", "client_2")
-                                    .await,
-                            )
-                        }
-                    }),
-                ]
-                .into_iter()
-            })
-            .collect();
+        #[tokio::test]
+        async fn should_isolate_limits_between_concurrent_clients() {
+            let routes = create_routes();
+            let server = std::sync::Arc::new(TestServer::new(routes));
+            let handles: Vec<_> = (1..120)
+                .flat_map(|_| {
+                    [
+                        tokio::spawn({
+                            let server = server.clone();
+                            async move {
+                                (
+                                    "client_1",
+                                    server
+                                        .get("/rate-limit")
+                                        .add_header("X-API-Key", "client_1")
+                                        .await,
+                                )
+                            }
+                        }),
+                        tokio::spawn({
+                            let server = server.clone();
+                            async move {
+                                (
+                                    "client_2",
+                                    server
+                                        .get("/rate-limit")
+                                        .add_header("X-API-Key", "client_2")
+                                        .await,
+                                )
+                            }
+                        }),
+                    ]
+                    .into_iter()
+                })
+                .collect();
 
-        let results = futures::future::join_all(handles).await;
-        let client_1_responses: Vec<_> = results
-            .iter()
-            .filter_map(|r| r.as_ref().ok())
-            .filter(|(client, _)| client == &"client_1")
-            .map(|(_, resp)| resp)
-            .collect();
-        let client_2_responses: Vec<_> = results
-            .iter()
-            .filter_map(|r| r.as_ref().ok())
-            .filter(|(client, _)| client == &"client_2")
-            .map(|(_, resp)| resp)
-            .collect();
-        let client_1_200 = client_1_responses
-            .iter()
-            .filter(|r| r.status_code() == 200)
-            .count();
-        let client_1_429 = client_1_responses
-            .iter()
-            .filter(|r| r.status_code() == 429)
-            .count();
-        let client_2_200 = client_2_responses
-            .iter()
-            .filter(|r| r.status_code() == 200)
-            .count();
-        let client_2_429 = client_2_responses
-            .iter()
-            .filter(|r| r.status_code() == 429)
-            .count();
+            let results = futures::future::join_all(handles).await;
+            let client_1_responses: Vec<_> = results
+                .iter()
+                .filter_map(|r| r.as_ref().ok())
+                .filter(|(client, _)| client == &"client_1")
+                .map(|(_, resp)| resp)
+                .collect();
+            let client_2_responses: Vec<_> = results
+                .iter()
+                .filter_map(|r| r.as_ref().ok())
+                .filter(|(client, _)| client == &"client_2")
+                .map(|(_, resp)| resp)
+                .collect();
+            let client_1_200 = client_1_responses
+                .iter()
+                .filter(|r| r.status_code() == 200)
+                .count();
+            let client_1_429 = client_1_responses
+                .iter()
+                .filter(|r| r.status_code() == 429)
+                .count();
+            let client_2_200 = client_2_responses
+                .iter()
+                .filter(|r| r.status_code() == 200)
+                .count();
+            let client_2_429 = client_2_responses
+                .iter()
+                .filter(|r| r.status_code() == 429)
+                .count();
 
-        assert_eq!(client_1_200, 60);
-        assert_eq!(client_1_429, 59);
-        assert_eq!(client_2_200, 60);
-        assert_eq!(client_2_429, 59);
+            assert_eq!(client_1_200, 60);
+            assert_eq!(client_1_429, 59);
+            assert_eq!(client_2_200, 60);
+            assert_eq!(client_2_429, 59);
+        }
     }
 }

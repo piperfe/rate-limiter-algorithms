@@ -21,9 +21,9 @@ Rate limiting is essential for protecting APIs from abuse, ensuring fair resourc
 ## Architecture Highlights
 
 - **Async-first**: Built on Axum + Tokio for modern async Rust
-- **Thread-safe**: Arc + Mutex for concurrent request handling
+- **Thread-safe**: DashMap (concurrent HashMap) for lock-free per-client state
 - **Configurable**: Environment-based configuration with type-safe defaults
-- **Well-tested**: Separated domain logic tests and full-stack endpoint tests
+- **Well-tested**: Separated domain logic tests and full-stack endpoint tests with organized test structure
 
 ## Quick Start
 

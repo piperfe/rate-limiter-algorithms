@@ -16,7 +16,7 @@ This document describes the system design, layer boundaries, and key decisions.
 │  Domain Layer (TokenBucket)             │
 │  - Token consumption logic              │
 │  - Refill calculation                   │
-│  - Concurrency-safe via Arc<Mutex>      │
+│  - Concurrency-safe via DashMap        │
 │  - Per-client independent quotas        │
 └─────────────────────────────────────────┘
 ```
@@ -25,26 +25,27 @@ This document describes the system design, layer boundaries, and key decisions.
 
 **Per-Client Isolation:**
 ```rust
-Arc<Mutex<Vec<TokenBucket>>>
-  └─ Each TokenBucket owns one client's quota
+Arc<DashMap<String, TokenBucket>>
+  └─ Each TokenBucket owns one client's quota (keyed by client_id)
      └─ Arc: shared ownership across requests
-     └─ Mutex: atomic access in concurrent scenarios
+     └─ DashMap: concurrent HashMap with O(1) lookups and atomic operations
 ```
 
 **Configuration:**
 ```rust
 struct AppState {
-    config: AppConfig,           // Loaded from env at startup
-    client_buckets: Arc<Mutex<>>  // Grows as new clients appear
+    config: AppConfig,                                   // Loaded from env at startup
+    client_buckets: Arc<DashMap<String, TokenBucket>>   // Grows as new clients appear
 }
 ```
 
-### Why Arc + Mutex?
+### Why DashMap?
 
-- **Arc** allows multiple requests (concurrent tasks) to share the same bucket list
-- **Mutex** ensures only one request can read/modify state at a time (atomicity)
-- **Trade-off:** Serializes concurrent access; for low-contention scenarios (rate limiting typically <1k clients), acceptable
-- See [ADR-002](./decisions/ADR-002-concurrent-access.md) for detailed justification
+- **O(1) Lookup** by client_id (vs. O(n) Vec scan)
+- **Concurrent Writes** handled automatically without explicit locking per operation
+- **Atomic Entry API** (`entry().or_insert_with()`) prevents race conditions
+- **Lower Contention** than Arc<Mutex<Vec>> for workloads with many clients
+- See [ADR-007](./decisions/ADR-007-dashmap-state-management.md) for detailed justification and migration from Arc+Mutex
 
 ## Configuration
 
@@ -146,4 +147,4 @@ trait RateLimitAlgorithm {
 
 ### Distributed Rate Limiting
 
-Per-client bucket state currently in-memory (Arc<Mutex>). Future: extract to pluggable backend (Redis, etc.) for multi-instance deployments.
+Per-client bucket state currently in-memory (Arc<DashMap>). Future: extract to pluggable backend (Redis, etc.) for multi-instance deployments. See [ADR-007](./decisions/ADR-007-dashmap-state-management.md) for scalability analysis.

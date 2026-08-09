@@ -11,7 +11,7 @@ Axum handlers need access to application state:
 ```rust
 async fn rate_limit_handler(
     State(config): State<AppConfig>,
-    State(client_buckets): State<Arc<Mutex<Vec<TokenBucket>>>>,
+    State(client_buckets): State<Arc<DashMap<String, TokenBucket>>>,
 ) -> Response<Body> {
     // Use config and client_buckets
 }
@@ -32,13 +32,13 @@ But `State` extracts the entire `AppState`. Options:
 #[derive(Clone, FromRef)]
 pub struct AppState {
     config: AppConfig,
-    client_buckets: Arc<Mutex<Vec<TokenBucket>>>,
+    client_buckets: Arc<DashMap<String, TokenBucket>>,
 }
 
 // Handlers can now extract individual fields:
 async fn rate_limit_handler(
     State(config): State<AppConfig>,
-    State(buckets): State<Arc<Mutex<Vec<TokenBucket>>>>,
+    State(buckets): State<Arc<DashMap<String, TokenBucket>>>,
 ) -> Response<Body> {
     // ...
 }
@@ -56,7 +56,7 @@ impl FromRef<AppState> for AppConfig {
     }
 }
 
-impl FromRef<AppState> for Arc<Mutex<Vec<TokenBucket>>> {
+impl FromRef<AppState> for Arc<DashMap<String, TokenBucket>> {
     fn from_ref(state: &AppState) -> Self {
         state.client_buckets.clone()
     }
@@ -79,13 +79,13 @@ Macro generates correct extraction for each field type:
 ```rust
 #[derive(Clone, FromRef)]
 struct AppState {
-    config: AppConfig,              // → impl FromRef<AppState> for AppConfig
-    client_buckets: Arc<Mutex<...>>,  // → impl FromRef<AppState> for Arc<Mutex<...>>
+    config: AppConfig,                                    // → impl FromRef<AppState> for AppConfig
+    client_buckets: Arc<DashMap<String, TokenBucket>>,   // → impl FromRef<AppState> for Arc<DashMap<...>>
 }
 
 // Handlers use extracted types directly:
 async fn handler(State(config): State<AppConfig>) { }
-async fn handler(State(buckets): State<Arc<Mutex<...>>>) { }
+async fn handler(State(buckets): State<Arc<DashMap<String, TokenBucket>>>) { }
 ```
 
 #### 3. Composability
@@ -96,7 +96,7 @@ Scaling to many fields:
 #[derive(Clone, FromRef)]
 struct AppState {
     config: AppConfig,
-    client_buckets: Arc<Mutex<Vec<TokenBucket>>>,
+    client_buckets: Arc<DashMap<String, TokenBucket>>,
     metrics: Arc<Metrics>,
     cache: Arc<Cache>,
 }
@@ -112,7 +112,7 @@ Adding a new field:
 #[derive(Clone, FromRef)]
 struct AppState {
     config: AppConfig,
-    client_buckets: Arc<Mutex<Vec<TokenBucket>>>,
+    client_buckets: Arc<DashMap<String, TokenBucket>>,
     logger: Arc<Logger>,  // ← New field
 }
 // ✓ Handlers can now use State(logger): State<Arc<Logger>>
@@ -203,7 +203,7 @@ use axum::extract::FromRef;
 #[derive(Clone, FromRef)]
 pub struct AppState {
     config: AppConfig,
-    client_buckets: Arc<Mutex<Vec<TokenBucket>>>,
+    client_buckets: Arc<DashMap<String, TokenBucket>>,
 }
 ```
 
@@ -216,13 +216,13 @@ pub struct AppState {
 
 ```rust
 async fn rate_limit_handler(
-    State(client_buckets): State<Arc<Mutex<Vec<TokenBucket>>>>,
+    State(client_buckets): State<Arc<DashMap<String, TokenBucket>>>,
     State(config): State<AppConfig>,
     headers: HeaderMap,
 ) -> Response<Body> {
     // config and client_buckets extracted from AppState
     // Axum calls: AppConfig::from_ref(&state)
-    //             Arc<Mutex<...>>::from_ref(&state)
+    //             Arc<DashMap<...>>::from_ref(&state)
 }
 ```
 
