@@ -28,25 +28,34 @@ Server listens on `http://0.0.0.0:3000`
 Rate limiting parameters are set via environment variables:
 
 ```bash
-# With defaults (capacity: 60 tokens/min, refill: 1 token/sec)
+# With defaults (capacity 60, refilling 1 token per second)
 cargo run
 
 # Override capacity
-BUCKET_CAPACITY=100 cargo run
+CAPACITY=100 cargo run
 
-# Override refill rate
-BUCKET_REFILL_RATE_PER_SECOND=2 cargo run
+# Refill 2 tokens per minute instead of per second
+UNIT_TIME=Minutes REFILL_RATE_PER_UNIT_TIME=2 cargo run
 
-# Both
-BUCKET_CAPACITY=100 BUCKET_REFILL_RATE_PER_SECOND=2 cargo run
+# All three
+CAPACITY=100 UNIT_TIME=Minutes REFILL_RATE_PER_UNIT_TIME=2 cargo run
 ```
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `BUCKET_CAPACITY` | `60` | Maximum tokens in the bucket |
-| `BUCKET_REFILL_RATE_PER_SECOND` | `1` | Tokens added per second |
+| `CAPACITY` | `60` | Maximum tokens in the bucket |
+| `UNIT_TIME` | `Seconds` | Period the refill rate applies to — `Days`, `Hours`, `Minutes`, or `Seconds` |
+| `REFILL_RATE_PER_UNIT_TIME` | `1` | Tokens added per `UNIT_TIME` |
+
+`UNIT_TIME` is case-sensitive and must match a variant exactly. An unrecognised value fails at startup rather than falling back to the default:
+
+```
+Boot Error: ... unknown variant `seconds`, expected one of `Days`, `Hours`, `Minutes`, `Seconds`
+```
+
+Unrecognised *variable names* are ignored silently, so a typo in the variable itself leaves the default in place with no warning.
 
 ## Testing
 
@@ -61,7 +70,7 @@ cargo test --lib token_bucket
 cargo test web_server::integration_tests
 
 # Run a specific test
-cargo test should_deny_a_request -- --nocapture
+cargo test <test_name> -- --nocapture
 
 # Run with output
 cargo test -- --nocapture
@@ -145,19 +154,15 @@ async fn main() {
 }
 ```
 
-### Missing Environment Variables Error
+### Boot Error on Startup
 
-The application provides defaults, so you can run without setting env vars. If you see an error, ensure defaults are defined in `src/web_server.rs`:
+Every setting has a default, so the server runs with no env vars at all. A boot error means a variable was set to a value that could not be parsed — most often `UNIT_TIME` with the wrong casing:
 
-```rust
-#[derive(Deserialize, Clone, Debug)]
-struct AppConfig {
-    #[serde(default = "default_bucket_capacity")]
-    bucket_capacity: u64,
-    #[serde(default = "default_bucket_rate")]
-    bucket_refill_rate_per_second: u64,
-}
 ```
+Boot Error: ... unknown variant `seconds`, expected one of `Days`, `Hours`, `Minutes`, `Seconds`
+```
+
+Check the value against the table above. The defaults themselves live on `AppConfig` in `src/web_server.rs`.
 
 ## Next Steps
 

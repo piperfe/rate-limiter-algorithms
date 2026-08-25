@@ -1,4 +1,5 @@
 use crate::TokenBucket;
+use crate::window_unit::WindowUnit;
 use axum::{
     Router,
     body::Body,
@@ -13,15 +14,20 @@ use std::sync::Arc;
 
 #[derive(Deserialize, Clone, Debug)]
 struct AppConfig {
-    #[serde(default = "default_bucket_capacity")]
-    bucket_capacity: u64,
-    #[serde(default = "default_bucket_rate")]
-    bucket_refill_rate_per_second: u64,
+    #[serde(default = "default_capacity")]
+    capacity: u64,
+    #[serde(default = "default_unit_time")]
+    unit_time: WindowUnit,
+    #[serde(default = "default_refill_rate_per_unit_time")]
+    refill_rate_per_unit_time: u64,
 }
-fn default_bucket_capacity() -> u64 {
+fn default_capacity() -> u64 {
     60
 }
-fn default_bucket_rate() -> u64 {
+fn default_unit_time() -> WindowUnit {
+    WindowUnit::Seconds
+}
+fn default_refill_rate_per_unit_time() -> u64 {
     1
 }
 
@@ -50,12 +56,22 @@ async fn rate_limit_handler(
     State(config): State<AppConfig>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    let client_api_key = headers.get("X-Api-Key").unwrap().to_str().unwrap();
+    let client_api_key = match headers.get("X-Api-Key").map(|value| value.to_str()) {
+        Some(Ok(client_api_key)) => client_api_key,
+        Some(Err(_)) => {
+            return bad_request_response_builder("X-Api-Key header contains invalid characters");
+        }
+        None => return bad_request_response_builder("X-Api-Key header is missing"),
+    };
 
     let mut client_bucket = client_buckets
         .entry(client_api_key.to_string())
         .or_insert_with(|| {
-            TokenBucket::new(config.bucket_capacity, config.bucket_refill_rate_per_second)
+            TokenBucket::new(
+                config.capacity,
+                config.unit_time,
+                config.refill_rate_per_unit_time,
+            )
         });
     let response = client_bucket.is_allowed();
 
@@ -77,6 +93,13 @@ fn too_many_requests_response_builder(client_api_key: &str) -> Response<Body> {
         .unwrap();
 }
 
+fn bad_request_response_builder(reason: &str) -> Response<Body> {
+    Response::builder()
+        .status(400)
+        .body(Body::from(format!("Bad Request: {}", reason)))
+        .unwrap()
+}
+
 fn response_ok_builder(client_api_key: &str, remaining_tokens: u64) -> Response<Body> {
     Response::builder()
         .status(200)
@@ -96,17 +119,55 @@ fn response_ok_builder(client_api_key: &str, remaining_tokens: u64) -> Response<
 mod integration_tests {
     use crate::web_server::create_routes;
     use axum_test::TestServer;
+    use serial_test::serial;
     use temp_env;
+
+    mod bad_request {
+        use super::*;
+
+        #[tokio::test]
+        async fn should_return_400_when_api_key_header_is_missing() {
+            let routes = create_routes();
+            let server = TestServer::new(routes);
+
+            let response = server
+                .get("/rate-limit")
+                .add_header("X-API-identifier", "client_1")
+                .await;
+
+            assert_eq!(response.status_code(), 400);
+            assert_eq!(response.text(), "Bad Request: X-Api-Key header is missing");
+        }
+
+        #[tokio::test]
+        async fn should_return_400_when_api_key_header_has_invalid_characters() {
+            let routes = create_routes();
+            let server = TestServer::new(routes);
+
+            let response = server
+                .get("/rate-limit")
+                .add_header("X-API-Key", "clïent")
+                .await;
+
+            assert_eq!(response.status_code(), 400);
+            assert_eq!(
+                response.text(),
+                "Bad Request: X-Api-Key header contains invalid characters"
+            );
+        }
+    }
 
     mod configuration {
         use super::*;
 
         #[tokio::test]
+        #[serial]
         async fn should_return_200_with_custom_capacity_from_env_vars() {
-            let bucket_capacity = ("BUCKET_CAPACITY", Some("10"));
-            let bucket_refill_rate_per_second = ("BUCKET_REFILL_RATE_PER_SECOND", Some("1"));
+            let bucket_capacity = ("CAPACITY", Some("10"));
+            let unit_time = ("UNIT_TIME", Some("Seconds"));
+            let refill_rate_per_unit_time = ("REFILL_RATE_PER_UNIT_TIME", Some("1"));
             temp_env::async_with_vars(
-                [bucket_capacity, bucket_refill_rate_per_second],
+                [bucket_capacity, unit_time, refill_rate_per_unit_time],
                 (|| async {
                     let routes = create_routes();
                     let server = TestServer::new(routes);
@@ -132,6 +193,40 @@ mod integration_tests {
         }
 
         #[tokio::test]
+        #[serial]
+        async fn should_apply_the_configured_unit_time_to_the_refill_period() {
+            let bucket_capacity = ("CAPACITY", Some("1"));
+            let unit_time = ("UNIT_TIME", Some("Minutes"));
+            let refill_rate_per_unit_time = ("REFILL_RATE_PER_UNIT_TIME", Some("1"));
+            temp_env::async_with_vars(
+                [bucket_capacity, unit_time, refill_rate_per_unit_time],
+                (|| async {
+                    let routes = create_routes();
+                    let server = TestServer::new(routes);
+
+                    let first = server
+                        .get("/rate-limit")
+                        .add_header("X-API-Key", "client_1")
+                        .await;
+                    assert_eq!(first.status_code(), 200);
+
+                    // A second passes: enough to refill under the default `Seconds`,
+                    // nowhere near enough under the configured `Minutes`.
+                    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+                    let second = server
+                        .get("/rate-limit")
+                        .add_header("X-API-Key", "client_1")
+                        .await;
+                    assert_eq!(second.status_code(), 429);
+                    assert_eq!(second.text(), "Too Many Requests");
+                })(),
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        #[serial]
         async fn should_return_200_with_default_capacity_for_new_client() {
             let routes = create_routes();
             let server = TestServer::new(routes);
@@ -158,6 +253,7 @@ mod integration_tests {
         use super::*;
 
         #[tokio::test]
+        #[serial]
         async fn should_return_200_with_decremented_tokens_on_repeat_request() {
             let routes = create_routes();
             let server = TestServer::new(routes);
@@ -188,6 +284,7 @@ mod integration_tests {
         }
 
         #[tokio::test]
+        #[serial]
         async fn should_return_429_when_tokens_exhausted() {
             let routes = create_routes();
             let server = TestServer::new(routes);
@@ -224,6 +321,7 @@ mod integration_tests {
         use super::*;
 
         #[tokio::test]
+        #[serial]
         async fn should_enforce_limit_correctly_under_concurrent_load_single_client() {
             let routes = create_routes();
             let server = std::sync::Arc::new(TestServer::new(routes));
@@ -254,6 +352,7 @@ mod integration_tests {
         }
 
         #[tokio::test]
+        #[serial]
         async fn should_isolate_limits_between_concurrent_clients() {
             let routes = create_routes();
             let server = std::sync::Arc::new(TestServer::new(routes));

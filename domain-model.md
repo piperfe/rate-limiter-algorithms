@@ -1,130 +1,74 @@
-# Domain Model: Token Bucket
+# Domain Model
 
-This document describes the TokenBucket algorithm, its state invariants, and behavior.
+The domain layer holds the rate-limiting algorithms and the value object they share. It knows nothing about HTTP, configuration, or storage — see [ARCHITECTURE.md](./ARCHITECTURE.md) for how it is wired.
 
-## Overview
+Field-level detail lives in the source. This document covers the concepts, the invariants, and the reasoning that is not visible from a struct definition.
 
-The token bucket is a rate limiting algorithm where:
-- Tokens accumulate at a fixed rate (`refill_rate_per_second`)
-- Each request consumes one token
-- Requests are allowed only if tokens are available
-- Bucket capacity caps the maximum tokens (prevents unbounded accumulation)
+## WindowUnit (`src/window_unit.rs`)
 
-## State
+A period — days, hours, minutes, or seconds — with two operations:
 
-```rust
-pub struct TokenBucket {
-    client_id: String,                    // Unique identifier
-    capacity: u64,                        // Max tokens (e.g., 60)
-    remaining_tokens: u64,                // Current tokens
-    refill_rate_per_second: u64,          // Tokens added per second
-    last_request_date: Instant,           // Timestamp of last operation
-}
+- **`in_seconds()`** — how long one period lasts
+- **`elapsed_units(elapsed_seconds)`** — how many *whole* periods fit into a span, discarding any remainder
+
+Both algorithms derive their timing from `elapsed_units`, so replenishment is granted only for complete periods. Partial time is never lost, but it is not spendable until it completes a period — see *Anchoring* below.
+
+This is the seam that keeps the algorithms testable without sleeping. Verifying that a `Minutes` bucket waits a full minute is arithmetic, not a minute-long test.
+
+## Anchoring — shared by both algorithms
+
+Each algorithm stores a single `Instant` marking where the current period began. Elapsed time is measured from that anchor, and **the anchor advances by whole periods consumed — never to `now`**:
+
+```
+anchor += elapsed_units × unit_time.in_seconds()
 ```
 
-## Invariants
+The unspent remainder is not stored in a field. It lives in the gap between the anchor and `now`, so leaving the anchor on the period boundary is what preserves it. Setting it to `now` closes that gap and discards the time — which under-delivers quota by up to 50% and, under sustained sub-period traffic, prevents replenishment entirely.
 
-1. **Capacity Bound:** `remaining_tokens <= capacity` always
-2. **Non-negative:** `remaining_tokens >= 0` always
-3. **Client Isolation:** Each TokenBucket owns exactly one client's quota
-4. **Time Monotonicity:** `last_request_date` only moves forward
+This is the single most important invariant in the domain layer. [ADR-008](./decisions/ADR-008-replenishment-anchoring.md) has the derivation, the worked examples, and the alternatives considered. Any future algorithm deriving replenishment from elapsed time inherits this rule.
 
-## Operations
+Because only whole multiples of the period are ever added, the anchor stays congruent to its origin: periods fall on a stable grid whose zero point is the bucket's creation. Note this is *not* wall-clock alignment — resets do not land on `:00` of each minute.
 
-### `is_allowed() -> AllowedTokenRequest`
+## TokenBucket (`src/token_bucket.rs`)
 
-**Algorithm:**
-```
-1. Calculate elapsed time since last request
-2. Calculate refilled tokens = elapsed_seconds * refill_rate_per_second
-3. Calculate available = min(refilled + remaining, capacity)
-4. Update remaining_tokens = available
-5. Update last_request_date = now
-6.
-7. If available == 0:
-     return AllowedTokenRequest { allowed: false, remaining_tokens: 0 }
-8. Else:
-     remaining_tokens -= 1
-     return AllowedTokenRequest { allowed: true, remaining_tokens }
-```
+Tokens **accrue continuously** at `refill_rate_per_unit_time` per `unit_time`, up to `capacity`. Each allowed request spends one.
 
-**Time Complexity:** O(1)
+Invariants:
 
-**Examples:**
+1. `remaining_tokens <= capacity` — accrual is clamped, so idle time cannot bank unlimited quota
+2. The long-run grant rate equals the configured rate — this is what the anchoring rule protects
+3. The anchor only moves forward
 
-_Initial state: capacity=60, rate=1 token/sec, remaining=60_
+Continuous proportional accrual is what makes this a token bucket rather than a fixed window. A client that has been quiet accumulates tokens gradually and can spend them in a burst up to `capacity`.
 
-**Request 1 (t=0s):**
-- Elapsed: 0s → refilled: 0
-- Available: min(0 + 60, 60) = 60
-- Remaining after consume: 59
-- **Result:** allowed=true, remaining=59
+**Zero rate** is legal: the bucket never replenishes, so the first `capacity` requests are allowed and everything after is denied.
 
-**Request 2 (t=0.1s):**
-- Elapsed: 0.1s → refilled: 0 (rounds down to 0 seconds)
-- Available: min(0 + 59, 60) = 59
-- **Result:** allowed=true, remaining=58
+**Overflow** in the accrual multiply is documented on `TokenBucket::new` — it requires a configured rate around 5.8×10¹¹ tokens/second, so the arithmetic is deliberately unguarded.
 
-**Request 61 (t=0s, after 60 requests):**
-- Elapsed: ~0s → refilled: 0
-- Available: min(0 + 0, 60) = 0
-- **Result:** allowed=false, remaining=0
+## FixedWindow (`src/fixed_window.rs`)
 
-**Request 62 (t=2s, after 60 initial requests):**
-- Elapsed: 2s → refilled: 2
-- Available: min(2 + 0, 60) = 2
-- Remaining after consume: 1
-- **Result:** allowed=true, remaining=1
+The counter **resets outright** to `capacity` once a full period elapses. Nothing accrues in between.
 
-## Client Identification
+Invariants:
 
-Each TokenBucket is uniquely identified by `client_id` (typically from HTTP `X-API-Key` header).
+1. `remaining_tokens <= capacity`
+2. Within a period, only denials and decrements happen — no replenishment
+3. The anchor only moves forward
 
-**Matching:**
-```rust
-pub fn matches_client_id(&self, client_id: &str) -> bool {
-    self.client_id == client_id
-}
-```
+Capping is **not** a concept here. A token bucket must clamp because tokens accumulate; a fixed window jumps straight to `capacity`, so there is nothing to overflow. Do not port a capacity-capping test from one to the other.
 
-## Concurrency Behavior
+The guarantee offered is *"quota resets every period on a fixed grid"* rather than *"quota resets one period after your last reset."* The anchoring rule is what makes the reset schedule predictable to a client instead of re-phasing on every request.
 
-TokenBucket itself is not thread-safe (interior mutability not used). Thread safety is handled by the caller via `Arc<DashMap<String, TokenBucket>>`:
+## Time source
 
-- Requests for the **same client** are atomic (DashMap entry operation is atomic)
-- Requests for **different clients** access different buckets (fine-grained locking per shard)
-- **No lock contention** between clients (DashMap uses shard-based locking)
+Both algorithms use `std::time::Instant`, which is **monotonic**. System clock adjustments — NTP steps, daylight saving, manual changes — cannot move it backwards or affect elapsed calculations. The trade-off is that `Instant` has no calendar relationship, which is why wall-clock-aligned windows are not currently possible (see ADR-008).
 
-**Trade-off:** Lock-free concurrent access with O(1) lookup by client_id. See [ADR-007](../decisions/ADR-007-dashmap-state-management.md) for detailed rationale.
+Both call `Instant::now()` internally today. A TODO in each file proposes taking `now: Instant` as a parameter instead, so timing tests can use exact offsets rather than `thread::sleep`.
 
-## Edge Cases
+## Client identity
 
-### Capacity Reached
+Neither algorithm stores a client identifier. Buckets are keyed by API key in the `DashMap` that owns them, so identity is the storage layer's concern — see [ADR-007](./decisions/ADR-007-dashmap-state-management.md). Each instance is single-client by construction and is not thread-safe on its own; atomicity comes from the map's per-entry locking.
 
-Once bucket is full, no further refill occurs:
-```
-remaining = min(0 + refilled, capacity)
-```
-If refilled is large, it's capped at capacity.
+## Testing
 
-### Time Drift
-
-If `last_request_date` is far in the past (e.g., system clock adjustment), refill calculates correctly:
-```
-refilled = elapsed * rate
-```
-Capped at capacity, so bucket never exceeds limit.
-
-### Zero Rate
-
-If `refill_rate_per_second = 0`, bucket never refills. Behavior:
-- First N requests allowed (consume N tokens)
-- All subsequent requests denied (capacity depleted)
-
-## Testing Strategy
-
-See [TESTING.md](./TESTING.md) for unit test scenarios covering:
-- Token consumption
-- Token refill
-- Capacity overflow prevention
-- Concurrent access (thread safety)
+See [TESTING.md](./TESTING.md) for which layer owns which behaviour and why the time arithmetic is tested separately from the algorithms.

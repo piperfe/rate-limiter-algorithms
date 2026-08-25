@@ -29,6 +29,10 @@ Architectural question: Single monolithic test suite vs. split by level?
 1. **Domain unit tests** (`src/token_bucket.rs::tests`) — Algorithm correctness
 2. **Endpoint integration tests** (`src/web_server.rs::integration_tests`) — HTTP contract
 
+> **Extended 2026-08-25:** a third layer was added below the domain — **value object tests**
+> (`src/window_unit.rs::tests`) covering period-to-seconds conversion and whole-unit counting.
+> See *Extension* at the end of this ADR.
+
 ### Rationale
 
 #### 1. Separation of Concerns
@@ -287,3 +291,36 @@ Focus: HTTP request/response contract.
 - [Rust: Testing guide](https://doc.rust-lang.org/book/ch11-00-testing.html)
 - [Unit vs Integration Tests](https://doc.rust-lang.org/book/ch11-03-test-organization.html)
 - [Testing Pyramid concept](https://martinfowler.com/bliki/TestPyramid.html)
+
+## Extension (2026-08-25): a value-object layer beneath the domain
+
+### Why a third layer
+
+Time-unit conversion originally lived inline in each algorithm, which forced every timing behaviour to be verified by sleeping. Two consequences:
+
+- **Cost.** Confirming a `Minutes` period required a 60-second test. Two such tests put the suite at **60.01s**.
+- **Coverage.** `Days` and `Hours` were untestable in principle — nobody sleeps a day — so those branches shipped unverified.
+
+Extracting `WindowUnit` into `src/window_unit.rs` made the conversion a pure function of its inputs. Asserting it directly takes microseconds and reaches every variant.
+
+Suite went **60.01s → 3.01s** with strictly more coverage.
+
+### Layer boundaries
+
+| Layer | Owns | Does NOT test |
+|---|---|---|
+| Value object | Period arithmetic, whole-unit counting, remainder truncation | Allow/deny decisions |
+| Domain | Allow/deny, replenishment timing, anchoring, thread safety | Time arithmetic, HTTP |
+| Endpoint | Status codes, headers, config loading, client isolation | Algorithm internals |
+
+Both algorithms share the conversion, so it is tested once rather than once per algorithm — the saving compounds as algorithms are added.
+
+### The rule this creates
+
+**Timing tests belong at the lowest layer that can express them.** A domain test may sleep one or two seconds using `WindowUnit::Seconds` to prove the wiring against a real clock; anything about how long a period *lasts* belongs to the value object.
+
+This also covers boundary conditions no timing test can reach reliably. `FixedWindow`'s reset predicate is `elapsed_units > 0`, equivalent to the older `elapsed_seconds >= in_seconds()` since `a / b > 0` exactly when `a >= b` for `b > 0` — so "does exactly 60 seconds count?" is answered by an arithmetic assertion rather than a sleep that might overshoot.
+
+### Known limitation
+
+Domain timing tests still call `Instant::now()` internally and tolerate only ~500ms of sleep overshoot before `elapsed_units` rounds to the next integer. Stable locally, fragile on a loaded CI runner. TODOs in `src/token_bucket.rs` and `src/fixed_window.rs` propose passing `now: Instant` as a parameter, which would make these tests exact and remove the remaining sleeps.

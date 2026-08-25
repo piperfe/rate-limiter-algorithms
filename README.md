@@ -5,18 +5,21 @@ A production-grade implementation of rate limiting algorithms in Rust, demonstra
 ## Features
 
 - **Token Bucket Algorithm** ✓
-  - Efficient token consumption and refill logic
+  - Continuous token accrual at a configurable rate and period
   - Per-client independent quotas
   - Capacity-aware overflow prevention
 
+- **Fixed Window Counter** ✓
+  - Quota resets to full capacity on a stable period grid
+  - Shares the time-unit handling and anchoring rules with Token Bucket
+
 - **Planned Algorithms**
-  - Fixed Window Counter
   - Sliding Window Log
   - Sliding Window Counter
 
 ## Why Rate Limiting?
 
-Rate limiting is essential for protecting APIs from abuse, ensuring fair resource allocation, and preventing cascading failures. This project explores multiple algorithmic approaches with realistic HTTP integration following RFC standards.
+Rate limiting is essential for protecting APIs from abuse, ensuring fair resource allocation, and preventing cascading failures. This project explores multiple algorithmic approaches with realistic HTTP integration, following the IETF `RateLimit` header field conventions.
 
 ## Architecture Highlights
 
@@ -31,11 +34,11 @@ Rate limiting is essential for protecting APIs from abuse, ensuring fair resourc
 # Build
 cargo build --release
 
-# Run with defaults (capacity: 60 tokens/min, refill: 1 token/sec)
+# Run with defaults (capacity 60, refilling 1 token per second)
 cargo run
 
 # Run with custom config
-BUCKET_CAPACITY=100 BUCKET_REFILL_RATE_PER_SECOND=2 cargo run
+CAPACITY=100 UNIT_TIME=Minutes REFILL_RATE_PER_UNIT_TIME=2 cargo run
 
 # Test
 cargo test

@@ -1,6 +1,6 @@
 # ADR-004: temp_env for Async Test Environment Variable Management
 
-**Status:** Accepted  
+**Status:** Accepted, amended 2026-08-25 — `temp_env` alone proved insufficient; see *Amendment* below  
 **Date:** 2026-08-05  
 **Author:** Rate Limiter Team
 
@@ -248,14 +248,42 @@ temp_env::async_with_vars([("BUCKET_CAPACTY", Some("10"))], ...)
 ✓ Tests use `async_with_vars` for isolation  
 ✓ No `unsafe { set_var() }` in test code  
 ✓ Tests pass in any order  
-✓ Tests pass with `--test-threads=1` or parallel  
+✓ Tests pass in parallel — config-dependent tests carry `#[serial]` (see Amendment)  
 ✓ Cleanup automatic even on panic
+
+## Amendment (2026-08-25): `temp_env` restores, it does not isolate
+
+This ADR listed "concurrent test execution → race conditions" among the problems `temp_env` would solve (Context), and TESTING.md went further, stating it was "safe for concurrent async tests." Both overstated it. `temp_env` guarantees *cleanup*, not *isolation*, and the distinction matters.
+
+Env vars are process-global. Rust runs tests concurrently within a single process, and `create_routes()` reads the environment at call time rather than at process start. So while one test holds `CAPACITY=10` in scope, any test running alongside it that calls `create_routes()` observes `10` — regardless of `temp_env` faithfully restoring the previous value afterwards.
+
+Observed as a reproducible flake, roughly 1 run in 3:
+
+```
+should_return_200_with_default_capacity_for_new_client
+  left:  "\"api-v1\";r=9;t=1;pk=:client_1:"    ← saw CAPACITY=10 from a sibling test
+  right: "\"api-v1\";r=59;t=1;pk=:client_1:"   ← expected the default 60
+```
+
+**Resolution: `serial_test`.** Tests whose assertions depend on configuration are marked `#[serial]` — both those that set env vars and those that rely on defaults. Five consecutive runs green afterwards.
+
+This **reverses alternative #3 above**, which rejected `#[serial]` as "works for 1-2 tests, not scalable." That verdict assumed serializing the whole suite. In practice `#[serial]` serializes only the tests carrying the attribute, so the six config-dependent endpoint tests run in sequence while every domain test stays parallel — total suite time was unchanged. The objection was to a cost the attribute does not actually impose.
+
+The second objection, that it "hides concurrency bugs," does hold: these tests no longer exercise concurrent access to `create_routes`. That is acceptable because the race being hidden is an artefact of process-global env vars in the test harness, not a property of the server, which reads its configuration once at startup.
+
+Alternatives weighed:
+
+- **`--test-threads=1`** — works, but serializes the entire suite including the domain tests that have no env dependency
+- **Config as a parameter** — give `create_routes` an `AppConfig` argument and keep a thin `create_routes_from_env()` for `main`. Then only one test needs the environment at all. Structurally the better answer, deferred as a production change beyond the scope of a test fix
+
+Cost of the chosen option: `#[serial]` serializes those tests against each other, but domain tests continue in parallel, so total suite time was unaffected.
 
 ## Future Enhancements
 
 - [ ] Add helper macro for common vars
 - [ ] Log which vars are set in tests (debugging)
 - [ ] Validate env var names against schema
+- [ ] Consider passing `AppConfig` into `create_routes` so tests stop depending on process env
 
 ## References
 

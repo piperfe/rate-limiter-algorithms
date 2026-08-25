@@ -5,21 +5,28 @@ This document describes the system design, layer boundaries, and key decisions.
 ## System Layers
 
 ```
-┌─────────────────────────────────────────┐
-│  HTTP Layer (Axum routes)               │
-│  - Extracts X-API-Key header            │
-│  - Returns 200 (allowed) or 429 (denied)│
-│  - RFC 7231 rate-limit headers          │
-└──────────────┬──────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  HTTP Layer (Axum routes)                    │
+│  - Extracts X-API-Key header                 │
+│  - 400 (bad key) · 200 (allowed) · 429 (denied) │
+│  - RateLimit response headers                │
+└──────────────┬───────────────────────────────┘
                │ State extraction (FromRef)
-┌──────────────▼──────────────────────────┐
-│  Domain Layer (TokenBucket)             │
-│  - Token consumption logic              │
-│  - Refill calculation                   │
-│  - Concurrency-safe via DashMap        │
-│  - Per-client independent quotas        │
-└─────────────────────────────────────────┘
+┌──────────────▼───────────────────────────────┐
+│  Domain Layer (TokenBucket · FixedWindow)    │
+│  - Allow/deny decisions                      │
+│  - Replenishment timing and anchoring        │
+│  - Per-client independent quotas             │
+└──────────────┬───────────────────────────────┘
+               │
+┌──────────────▼───────────────────────────────┐
+│  Value Object (WindowUnit)                   │
+│  - Period-to-seconds conversion              │
+│  - Whole-unit counting                       │
+└──────────────────────────────────────────────┘
 ```
+
+Per-client state is held in a `DashMap` owned by the HTTP layer; the algorithms themselves are single-client and not independently thread-safe. See [domain-model.md](./domain-model.md).
 
 ## State Management
 
@@ -54,18 +61,21 @@ struct AppState {
 Loaded at startup via `envy` + `serde`:
 
 ```bash
-BUCKET_CAPACITY=60                      # Max tokens in bucket
-BUCKET_REFILL_RATE_PER_SECOND=1        # Tokens added per second
+CAPACITY=60                    # Max tokens in bucket
+UNIT_TIME=Seconds              # Period the refill rate applies to
+REFILL_RATE_PER_UNIT_TIME=1    # Tokens added per UNIT_TIME
 ```
 
 Defaults provided via `#[serde(default)]` — no env vars required for local development.
+
+`UNIT_TIME` deserializes into the `WindowUnit` enum, so it is case-sensitive and an unrecognised value aborts startup. See `src/window_unit.rs` for the variants.
 
 ### Why envy + serde?
 
 - Typed deserialization (fails fast if config invalid)
 - Serde integration (standard Rust ecosystem choice)
 - Paired with `#[serde(default)]` for optional env vars
-- See [ADR-003](./decisions/ADR-003-config-strategy.md)
+- See [ADR-003](./decisions/ADR-003-configuration-strategy.md)
 
 ## Request Flow
 
@@ -73,17 +83,19 @@ Defaults provided via `#[serde(default)]` — no env vars required for local dev
 Client Request (X-API-Key: client_1)
     │
     ├─ Extract API key from header
+    │    └─ missing or non-ASCII → 400 Bad Request (with the reason)
     │
-    ├─ Look up or create TokenBucket for client
+    ├─ Look up or create the client's bucket
     │
-    ├─ Call is_allowed() on bucket
-    │    ├─ Calculate tokens refilled since last request
+    ├─ Call is_allowed()
+    │    ├─ Count whole periods since the anchor
+    │    ├─ Replenish, then advance the anchor by the periods consumed
     │    ├─ Cap at capacity
     │    ├─ Consume 1 token (if available)
     │    └─ Return { allowed, remaining_tokens }
     │
     └─ Return 200 (allowed) or 429 (denied)
-       └─ Include RFC rate-limit headers
+       └─ Include RateLimit headers
 ```
 
 ## HTTP Response Headers
@@ -102,6 +114,8 @@ Client Request (X-API-Key: client_1)
   └─ t: time window (seconds)
   └─ pk: per-key identifier (client ID)
 ```
+
+**Currently only `r` and `pk` reflect real state.** `q`, `w`, and `t` are hardcoded to `1` in `src/web_server.rs` regardless of the configured capacity and period, so a client reading them is misinformed. Computing them honestly means deriving `t` from the anchor — which the grid guarantee in [ADR-008](./decisions/ADR-008-replenishment-anchoring.md) makes well-defined — and sourcing `q`/`w` from `AppConfig`.
 
 ## Testing Strategy
 

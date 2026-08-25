@@ -15,3 +15,4 @@ dashmap = "5.5"
 [dev-dependencies]
 axum-test = "21"
 temp-env = { version = "0.3", features = ["async_closure"] }
+serial_test = "3"
