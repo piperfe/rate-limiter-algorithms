@@ -16,7 +16,7 @@ Each file groups its tests into nested `mod` blocks named after business concept
 
 **Scope:** Pure arithmetic — no clock, no sleeping.
 
-`WindowUnit::elapsed_units()` is the seam that keeps time-dependent behaviour cheap to test. Confirming that a `Minutes` bucket only replenishes after 60 real seconds does not require a 60-second test: the conversion and its integer truncation are asserted directly, while the domain layer proves the wiring against a real clock using `Seconds`.
+`WindowUnit::elapsed_time_units()` is the seam that keeps time-dependent behaviour cheap to test. Confirming that a `Minutes` bucket only replenishes after 60 real seconds does not require a 60-second test: the conversion and its integer truncation are asserted directly, while the domain layer proves the wiring using injected `Instant` offsets.
 
 This is also the only practical way to cover `Days` and `Hours` — sleeping a day was never an option, so those branches went unverified while the conversion was inlined in each algorithm.
 
@@ -30,7 +30,7 @@ Test names describe business behaviour — whether a request is allowed, whether
 
 The two algorithms differ in a way the groupings reflect: a token bucket *accrues* tokens continuously and must clamp at capacity, so capping is a real invariant there. A fixed window *resets* to capacity outright at the boundary, so there is no accumulation to clamp and no capping concept. Do not port a capping test from one to the other.
 
-Timing tests should use `WindowUnit::Seconds` and sleep for one or two seconds at most. Longer units are covered by the value-object layer.
+Timing tests take an injected `now: Instant` and advance it with `Duration` offsets — never `thread::sleep`. This makes exact-boundary assertions possible (e.g. denied at 999ms, allowed at 1000ms) and keeps the suite instant regardless of the configured unit. See [ADR-009](./decisions/ADR-009-clock-injection.md) for why. Longer units (`Minutes`, `Hours`, `Days`) are cheap to express this way and should be used wherever a test needs to distinguish real scaling from the `Seconds` special case where `in_seconds() == 1`.
 
 ## Endpoint Integration Tests (`src/web_server.rs`)
 

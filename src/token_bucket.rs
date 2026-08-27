@@ -14,10 +14,6 @@ pub struct AllowedTokenRequest {
     pub allowed: bool,
 }
 
-//TODO clock injection -> take `now: Instant` in `new` and `is_allowed` instead of calling
-//     `Instant::now()` internally, so timing tests use exact offsets from a fixed origin
-//     rather than `thread::sleep`. Today every timing test tolerates only ~500ms of sleep
-//     overshoot before `elapsed_units` rounds to the next integer. Applies to FixedWindow too.
 impl TokenBucket {
     /// Accrues `refill_rate_per_unit_time` tokens every `unit_time`, never exceeding `capacity`.
     ///
@@ -27,31 +23,28 @@ impl TokenBucket {
     /// limiter would plausibly use sits several orders of magnitude below that, so the arithmetic
     /// is left unguarded. If it ever did overflow, release builds wrap and the wrapped value is
     /// still clamped to `capacity`, so the granted quota stays correct.
-    pub fn new(capacity: u64, unit_time: WindowUnit, refill_rate_per_unit_time: u64) -> Self {
+    pub fn new(capacity: u64, unit_time: WindowUnit, refill_rate_per_unit_time: u64, last_request_date: Instant) -> Self {
         Self {
             capacity,
             unit_time,
             refill_rate_per_unit_time,
             remaining_tokens: capacity,
-            last_request_date: Instant::now(),
+            last_request_date,
         }
     }
 
-    pub fn is_allowed(&mut self) -> AllowedTokenRequest {
-        let now = Instant::now();
+    pub fn is_allowed(&mut self, now: Instant) -> AllowedTokenRequest {
+        let elapsed = now.duration_since(self.last_request_date);
+        let elapsed_time_units = self.unit_time.elapsed_time_units(elapsed);
+        let refilling_tokens = elapsed_time_units * self.refill_rate_per_unit_time;
 
-        let elapsed_seconds = now.duration_since(self.last_request_date).as_secs();
-        let elapse_units = self.unit_time.elapsed_units(elapsed_seconds);
-        let refilling_tokens = elapse_units * self.refill_rate_per_unit_time;
-
-        let refilled_unit_time = elapse_units * self.unit_time.in_seconds();
-        self.last_request_date += Duration::from_secs(refilled_unit_time);
+        let elapsed_seconds = elapsed_time_units * self.unit_time.in_seconds();
+        self.last_request_date += Duration::from_secs(elapsed_seconds);
 
         let mut tokens_available = refilling_tokens + self.remaining_tokens;
         if tokens_available > self.capacity {
             tokens_available = self.capacity;
         }
-
 
         if tokens_available == 0 {
             return AllowedTokenRequest {
@@ -72,15 +65,16 @@ impl TokenBucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::Mutex, thread, time::Duration};
+    use std::{sync::Mutex, time::Duration};
 
     mod allow_deny {
         use super::*;
 
         #[test]
         fn should_allow_request_when_tokens_available() {
-            let mut bucket = TokenBucket::new(1, WindowUnit::Seconds, 1);
-            let response: AllowedTokenRequest = bucket.is_allowed();
+            let now = Instant::now();
+            let mut bucket = TokenBucket::new(1, WindowUnit::Seconds, 1, now);
+            let response: AllowedTokenRequest = bucket.is_allowed(now);
 
             assert_eq!(response.allowed, true);
             assert_eq!(response.remaining_tokens, 0);
@@ -88,9 +82,10 @@ mod tests {
 
         #[test]
         fn should_deny_request_when_tokens_exhausted() {
-            let mut bucket = TokenBucket::new(1, WindowUnit::Seconds, 1);
-            bucket.is_allowed();
-            let response = bucket.is_allowed();
+            let now = Instant::now();
+            let mut bucket = TokenBucket::new(1, WindowUnit::Seconds, 1, now);
+            bucket.is_allowed(now);
+            let response = bucket.is_allowed(now);
 
             assert_eq!(response.allowed, false);
             assert_eq!(response.remaining_tokens, 0);
@@ -102,72 +97,98 @@ mod tests {
 
         #[test]
         fn should_refill_tokens_once_unit_time_elapses() {
-            let mut bucket = TokenBucket::new(5, WindowUnit::Seconds, 2);
-            bucket.is_allowed();
-            bucket.is_allowed();
-            bucket.is_allowed();
-            bucket.is_allowed();
-            let response: AllowedTokenRequest = bucket.is_allowed();
+            let now = Instant::now();
+            let mut bucket = TokenBucket::new(5, WindowUnit::Seconds, 2, now);
+            bucket.is_allowed(now);
+            bucket.is_allowed(now);
+            bucket.is_allowed(now);
+            bucket.is_allowed(now);
+            let first: AllowedTokenRequest = bucket.is_allowed(now);
 
-            assert_eq!(response.allowed, true);
-            assert_eq!(response.remaining_tokens, 0);
+            assert_eq!(first.allowed, true);
+            assert_eq!(first.remaining_tokens, 0);
 
-            thread::sleep(Duration::from_secs(2));
-
-            let response1: AllowedTokenRequest = bucket.is_allowed();
-            assert_eq!(response1.allowed, true);
-            assert_eq!(response1.remaining_tokens, 3);
+            let second: AllowedTokenRequest = bucket.is_allowed(now + Duration::from_secs(2));
+            assert_eq!(second.allowed, true);
+            assert_eq!(second.remaining_tokens, 3);
         }
 
         #[test]
         fn should_cap_tokens_at_capacity() {
-            let mut bucket = TokenBucket::new(1, WindowUnit::Seconds, 1);
-            let response: AllowedTokenRequest = bucket.is_allowed();
+            let now = Instant::now();
+            let mut bucket = TokenBucket::new(1, WindowUnit::Seconds, 1, now);
+            let first: AllowedTokenRequest = bucket.is_allowed(now);
+            assert_eq!(first.allowed, true);
+            assert_eq!(first.remaining_tokens, 0);
 
-            assert_eq!(response.allowed, true);
-            assert_eq!(response.remaining_tokens, 0);
-
-            thread::sleep(Duration::from_secs(3));
-
-            let response1: AllowedTokenRequest = bucket.is_allowed();
-            assert_eq!(response1.allowed, true);
-            assert_eq!(response1.remaining_tokens, 0);
+            let second: AllowedTokenRequest = bucket.is_allowed(now + Duration::from_secs(3));
+            assert_eq!(second.allowed, true);
+            assert_eq!(second.remaining_tokens, 0);
         }
 
         #[test]
         fn should_not_refill_until_the_full_unit_has_elapsed() {
-            let mut bucket = TokenBucket::new(5, WindowUnit::Seconds, 2);
-            for _ in 0..5 { bucket.is_allowed(); }
+            let now = Instant::now();
+            let mut bucket = TokenBucket::new(5, WindowUnit::Seconds, 2, now);
+            for _ in 0..5 { bucket.is_allowed(now); }
 
-            thread::sleep(Duration::from_millis(500));
+            let first: AllowedTokenRequest = bucket.is_allowed(now + Duration::from_millis(999));
+            assert_eq!(first.allowed, false);
+            assert_eq!(first.remaining_tokens, 0);
 
-            let response: AllowedTokenRequest = bucket.is_allowed();
-            assert_eq!(response.allowed, false);
-            assert_eq!(response.remaining_tokens, 0);
-
-            thread::sleep(Duration::from_millis(500));
-
-            let response1: AllowedTokenRequest = bucket.is_allowed();
-            assert_eq!(response1.allowed, true);
-            assert_eq!(response1.remaining_tokens, 1);
+            let second: AllowedTokenRequest = bucket.is_allowed(now + Duration::from_millis(1000));
+            assert_eq!(second.allowed, true);
+            assert_eq!(second.remaining_tokens, 1);
         }
 
         #[test]
         fn should_not_lose_partial_units_between_refills() {
-            let mut bucket = TokenBucket::new(5, WindowUnit::Seconds, 1);
-            for _ in 0..5 { bucket.is_allowed(); }          // exhaust
+            let now = Instant::now();
+            let mut bucket = TokenBucket::new(5, WindowUnit::Seconds, 1, now);
+            for _ in 0..5 { bucket.is_allowed(now); }          // exhaust
 
-            thread::sleep(Duration::from_millis(1500));      // 1 whole unit + 500ms
-
-            let first = bucket.is_allowed();
+            // 1 whole unit + 500ms
+            let first = bucket.is_allowed(now + Duration::from_millis(1500));
             assert_eq!(first.allowed, true);
             assert_eq!(first.remaining_tokens, 0);           // 1 refilled, 1 consumed
 
-            thread::sleep(Duration::from_millis(1500));      // another 1.5 units
-
-            let second = bucket.is_allowed();
+            // another 1.5 units
+            let second = bucket.is_allowed(now + Duration::from_millis(3000));
             assert_eq!(second.allowed, true);
             assert_eq!(second.remaining_tokens, 1);          // 2 refilled (1 + carried 0.5+0.5), 1 consumed
+        }
+
+        #[test]
+        fn should_advance_the_anchor_by_the_full_unit_in_seconds() {
+            // Seconds tests can't see a missing "* in_seconds()" since it's a no-op there; Minutes can.
+            let now = Instant::now();
+            let mut bucket = TokenBucket::new(1, WindowUnit::Minutes, 1, now);
+            bucket.is_allowed(now);
+
+            let refill = bucket.is_allowed(now + Duration::from_secs(60));
+            assert_eq!(refill.allowed, true);
+
+            // A buggy 1s-per-refill anchor (instead of 60s) would wrongly allow this.
+            let after = bucket.is_allowed(now + Duration::from_secs(61));
+            assert_eq!(after.allowed, false);
+        }
+
+        #[test]
+        fn should_never_replenish_at_zero_rate() {
+            let now = Instant::now();
+            let mut bucket = TokenBucket::new(1, WindowUnit::Seconds, 0, now);
+
+            let first = bucket.is_allowed(now);
+            assert_eq!(first.allowed, true);
+            assert_eq!(first.remaining_tokens, 0);
+
+            let second = bucket.is_allowed(now);
+            assert_eq!(second.allowed, false);
+            assert_eq!(second.remaining_tokens, 0);
+
+            // A long wait grants nothing further — the rate is zero, not merely slow.
+            let much_later = bucket.is_allowed(now + Duration::from_secs(3600));
+            assert_eq!(much_later.allowed, false);
         }
     }
 
@@ -176,14 +197,15 @@ mod tests {
 
         #[test]
         fn should_enforce_limit_under_concurrent_access() {
-            let bucket = Mutex::new(TokenBucket::new(3, WindowUnit::Seconds, 1));
+            let now = Instant::now();
+            let bucket = Mutex::new(TokenBucket::new(3, WindowUnit::Seconds, 1, now));
 
             let requests: Vec<_> = std::thread::scope(|scope| {
                 let handles: Vec<_> = (0..4)
                     .map(|_| {
                         scope.spawn(|| {
                             let mut data = bucket.lock().unwrap();
-                            data.is_allowed()
+                            data.is_allowed(now)
                         })
                     })
                     .collect();

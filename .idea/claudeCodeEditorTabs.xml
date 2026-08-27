@@ -1,23 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ClaudeCodeEditorTabs">
-    <option name="activeSessionId" value="5a81c262-0ccf-4331-a447-09a76afbe4dd" />
+    <option name="activeSessionId" value="550ea0b5-5e8a-419a-8943-c2dc89bdd2e4" />
     <option name="openSessionIds">
       <list>
-        <option value="5f4d769a-5e26-4774-800c-f1d5a8f16d2f" />
         <option value="5a81c262-0ccf-4331-a447-09a76afbe4dd" />
+        <option value="ba891424-3a3d-47fc-9db0-6bc6f4d61325" />
+        <option value="550ea0b5-5e8a-419a-8943-c2dc89bdd2e4" />
       </list>
     </option>
     <option name="sessionPaths">
       <map>
+        <entry key="550ea0b5-5e8a-419a-8943-c2dc89bdd2e4" value="/sessions/96891b2b-a390-4a7d-856b-bf29d3b8f81e" />
         <entry key="5a81c262-0ccf-4331-a447-09a76afbe4dd" value="/sessions/573966ed-853f-4a3d-9184-c72d77685c2a" />
-        <entry key="5f4d769a-5e26-4774-800c-f1d5a8f16d2f" value="/sessions/96891b2b-a390-4a7d-856b-bf29d3b8f81e" />
+        <entry key="ba891424-3a3d-47fc-9db0-6bc6f4d61325" value="/sessions/new" />
       </map>
     </option>
     <option name="sessionTitles">
       <map>
+        <entry key="550ea0b5-5e8a-419a-8943-c2dc89bdd2e4" value="how can I print the date and time of now fn is_all" />
         <entry key="5a81c262-0ccf-4331-a447-09a76afbe4dd" value="why let response = server.get(&quot;/&quot;).add_header(&quot;X-A" />
-        <entry key="5f4d769a-5e26-4774-800c-f1d5a8f16d2f" value="how can I print the date and time of now fn is_all" />
+        <entry key="ba891424-3a3d-47fc-9db0-6bc6f4d61325" value="Claude Code" />
       </map>
     </option>
   </component>

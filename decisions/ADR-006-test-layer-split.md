@@ -321,6 +321,14 @@ Both algorithms share the conversion, so it is tested once rather than once per 
 
 This also covers boundary conditions no timing test can reach reliably. `FixedWindow`'s reset predicate is `elapsed_units > 0`, equivalent to the older `elapsed_seconds >= in_seconds()` since `a / b > 0` exactly when `a >= b` for `b > 0` — so "does exactly 60 seconds count?" is answered by an arithmetic assertion rather than a sleep that might overshoot.
 
-### Known limitation
+### Known limitation (resolved 2026-08-26): clock injection
 
-Domain timing tests still call `Instant::now()` internally and tolerate only ~500ms of sleep overshoot before `elapsed_units` rounds to the next integer. Stable locally, fragile on a loaded CI runner. TODOs in `src/token_bucket.rs` and `src/fixed_window.rs` propose passing `now: Instant` as a parameter, which would make these tests exact and remove the remaining sleeps.
+Domain timing tests originally called `Instant::now()` internally and tolerated only ~500ms of sleep overshoot before `elapsed_time_units` rounded to the next integer — stable locally, fragile on a loaded CI runner.
+
+Resolved by injecting the clock: `TokenBucket::new`, `FixedWindow::new`, and both `is_allowed` methods now take `now: Instant` as a parameter instead of calling `Instant::now()` internally. Production code (`web_server.rs`) supplies the real clock once per request; tests supply exact offsets from a fixed origin.
+
+This removed every remaining sleep from the domain layer. `token_bucket` and `fixed_window` dropped from 3.01s and 1.01s respectively to 0.00s, and tests can now assert the exact inclusive boundary — `now + 999ms` denied, `now + 1000ms` allowed — which no sleep-based test could pin reliably.
+
+It also closed a coverage gap the injection made visible: every existing timing test used `WindowUnit::Seconds`, where `in_seconds() == 1` makes the anchor-advance multiplication `elapsed_time_units * in_seconds()` indistinguishable from `elapsed_time_units` alone. Deleting that multiplication left all tests green. Two new tests — `should_advance_the_anchor_by_the_full_unit_in_seconds` in each domain file — use `WindowUnit::Minutes` and cross the boundary twice, which fails specifically when that multiplication is missing.
+
+The only sleep remaining in the suite is in `web_server.rs`'s `configuration` test, where time enters through the HTTP handler rather than a direct call.

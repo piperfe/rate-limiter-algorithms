@@ -11,6 +11,7 @@ use axum_macros::FromRef;
 use dashmap::DashMap;
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Deserialize, Clone, Debug)]
 struct AppConfig {
@@ -64,6 +65,7 @@ async fn rate_limit_handler(
         None => return bad_request_response_builder("X-Api-Key header is missing"),
     };
 
+    let now = Instant::now();
     let mut client_bucket = client_buckets
         .entry(client_api_key.to_string())
         .or_insert_with(|| {
@@ -71,9 +73,10 @@ async fn rate_limit_handler(
                 config.capacity,
                 config.unit_time,
                 config.refill_rate_per_unit_time,
+                now,
             )
         });
-    let response = client_bucket.is_allowed();
+    let response = client_bucket.is_allowed(now);
 
     if !response.allowed {
         return too_many_requests_response_builder(client_api_key);

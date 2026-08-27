@@ -28,6 +28,9 @@ This directory contains significant architectural and technical decisions made d
 - **[ADR-008: Replenishment Anchoring](./ADR-008-replenishment-anchoring.md)**  
   Advance the time anchor by whole periods consumed, never to `now`. Fixes rate shortfall of up to 50%.
 
+- **[ADR-009: Clock Injection](./ADR-009-clock-injection.md)**  
+  `now: Instant` as an explicit parameter instead of internal `Instant::now()`. Makes domain timing tests exact and instant; closed a `Seconds`-only coverage blind spot.
+
 ### Testing Strategy
 
 - **[ADR-004: Async Test Environment Variables](./ADR-004-async-test-env-vars.md)**  
@@ -71,7 +74,7 @@ Anticipated decisions for future phases:
 Start with [ADR-001](./ADR-001-web-framework-choice.md) and [ADR-007](./ADR-007-dashmap-state-management.md) to understand the foundation.
 
 **Implementing new algorithms?**  
-Read [ADR-006](./ADR-006-test-layer-split.md) for test structure conventions and [ADR-008](./ADR-008-replenishment-anchoring.md) for the time-anchoring rule.
+Read [ADR-006](./ADR-006-test-layer-split.md) for test structure conventions, [ADR-008](./ADR-008-replenishment-anchoring.md) for the time-anchoring rule, and [ADR-009](./ADR-009-clock-injection.md) for the `now: Instant` parameter convention.
 
 **Scaling to multiple instances?**  
 Read [ADR-007](./ADR-007-dashmap-state-management.md) "Scalability Limits" section and [ADR-003](./ADR-003-configuration-strategy.md) for distributed config strategies.

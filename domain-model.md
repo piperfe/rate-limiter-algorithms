@@ -9,9 +9,9 @@ Field-level detail lives in the source. This document covers the concepts, the i
 A period — days, hours, minutes, or seconds — with two operations:
 
 - **`in_seconds()`** — how long one period lasts
-- **`elapsed_units(elapsed_seconds)`** — how many *whole* periods fit into a span, discarding any remainder
+- **`elapsed_time_units(elapsed: Duration)`** — how many *whole* periods fit into a span, discarding any remainder
 
-Both algorithms derive their timing from `elapsed_units`, so replenishment is granted only for complete periods. Partial time is never lost, but it is not spendable until it completes a period — see *Anchoring* below.
+Both algorithms derive their timing from `elapsed_time_units`, so replenishment is granted only for complete periods. Partial time is never lost, but it is not spendable until it completes a period — see *Anchoring* below.
 
 This is the seam that keeps the algorithms testable without sleeping. Verifying that a `Minutes` bucket waits a full minute is arithmetic, not a minute-long test.
 
@@ -63,7 +63,7 @@ The guarantee offered is *"quota resets every period on a fixed grid"* rather th
 
 Both algorithms use `std::time::Instant`, which is **monotonic**. System clock adjustments — NTP steps, daylight saving, manual changes — cannot move it backwards or affect elapsed calculations. The trade-off is that `Instant` has no calendar relationship, which is why wall-clock-aligned windows are not currently possible (see ADR-008).
 
-Both call `Instant::now()` internally today. A TODO in each file proposes taking `now: Instant` as a parameter instead, so timing tests can use exact offsets rather than `thread::sleep`.
+Neither algorithm calls `Instant::now()` internally. Both `new` and `is_allowed` take the current instant as a parameter, so production code supplies the real clock while tests supply exact offsets from a fixed origin. This is what lets every domain timing test — including boundary cases like "denied at 999ms, allowed at 1000ms" — run without sleeping.
 
 ## Client identity
 

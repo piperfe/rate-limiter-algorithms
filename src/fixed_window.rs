@@ -13,30 +13,27 @@ pub struct AllowedFixedWindowRequest {
     pub allowed: bool,
 }
 
-//TODO clock injection -> see the matching note on TokenBucket; same change applies here
 impl FixedWindow {
-    pub fn new(capacity: u64, unit_time: WindowUnit) -> Self {
+    pub fn new(capacity: u64, unit_time: WindowUnit, last_request_date: Instant) -> Self {
         Self {
             capacity,
             unit_time,
             remaining_tokens: capacity,
-            last_request_date: Instant::now(),
+            last_request_date,
         }
     }
 
-    pub fn is_allowed(&mut self) -> AllowedFixedWindowRequest {
-        let now = Instant::now();
+    pub fn is_allowed(&mut self, now: Instant) -> AllowedFixedWindowRequest {
+        let elapsed = now.duration_since(self.last_request_date);
+        let elapsed_time_units = self.unit_time.elapsed_time_units(elapsed);
+
         let mut tokens_available = self.remaining_tokens;
-
-        let elapsed_seconds = now.duration_since(self.last_request_date).as_secs();
-        let elapsed_units = self.unit_time.elapsed_units(elapsed_seconds);
-
-        let time_to_refill = elapsed_units > 0;
+        let time_to_refill = elapsed_time_units > 0;
         if time_to_refill {
             tokens_available = self.capacity;
 
-            let elapsed_unit_time = elapsed_units * self.unit_time.in_seconds();
-            self.last_request_date += Duration::from_secs(elapsed_unit_time);
+            let elapsed_seconds = elapsed_time_units * self.unit_time.in_seconds();
+            self.last_request_date += Duration::from_secs(elapsed_seconds);
         }
 
         if tokens_available == 0 {
@@ -58,15 +55,16 @@ impl FixedWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::Mutex, thread, time::Duration};
+    use std::{sync::Mutex, time::Duration};
 
     mod allow_deny {
         use super::*;
 
         #[test]
         fn should_allow_request_when_tokens_available() {
-            let mut bucket = FixedWindow::new(10, WindowUnit::Minutes);
-            let response: AllowedFixedWindowRequest = bucket.is_allowed();
+            let now = Instant::now();
+            let mut bucket = FixedWindow::new(10, WindowUnit::Minutes, now);
+            let response: AllowedFixedWindowRequest = bucket.is_allowed(now);
 
             assert_eq!(response.allowed, true);
             assert_eq!(response.remaining_tokens, 9);
@@ -74,9 +72,10 @@ mod tests {
 
         #[test]
         fn should_deny_request_when_tokens_exhausted() {
-            let mut bucket = FixedWindow::new(1, WindowUnit::Minutes);
-            bucket.is_allowed();
-            let response = bucket.is_allowed();
+            let now = Instant::now();
+            let mut bucket = FixedWindow::new(1, WindowUnit::Minutes, now);
+            bucket.is_allowed(now);
+            let response = bucket.is_allowed(now);
 
             assert_eq!(response.allowed, false);
             assert_eq!(response.remaining_tokens, 0);
@@ -88,78 +87,86 @@ mod tests {
 
         #[test]
         fn should_reset_tokens_to_capacity_once_window_elapses() {
-            let mut bucket = FixedWindow::new(2, WindowUnit::Seconds);
-            bucket.is_allowed();
-            let response: AllowedFixedWindowRequest = bucket.is_allowed();
+            let now = Instant::now();
+            let mut bucket = FixedWindow::new(2, WindowUnit::Seconds, now);
+            bucket.is_allowed(now);
+            let response: AllowedFixedWindowRequest = bucket.is_allowed(now);
 
             assert_eq!(response.allowed, true);
             assert_eq!(response.remaining_tokens, 0);
 
-            thread::sleep(Duration::from_secs(1));
-
-            let response1: AllowedFixedWindowRequest = bucket.is_allowed();
+            let response1: AllowedFixedWindowRequest = bucket.is_allowed(now + Duration::from_secs(1));
             assert_eq!(response1.allowed, true);
             assert_eq!(response1.remaining_tokens, 1);
         }
 
         #[test]
         fn should_not_reset_until_the_full_window_has_elapsed() {
-            let mut bucket = FixedWindow::new(2, WindowUnit::Seconds);
-            bucket.is_allowed();
-            let response: AllowedFixedWindowRequest = bucket.is_allowed();
+            let now = Instant::now();
+            let mut bucket = FixedWindow::new(2, WindowUnit::Seconds, now);
+            bucket.is_allowed(now);
+            let first: AllowedFixedWindowRequest = bucket.is_allowed(now);
+            assert_eq!(first.allowed, true);
+            assert_eq!(first.remaining_tokens, 0);
 
-            assert_eq!(response.allowed, true);
-            assert_eq!(response.remaining_tokens, 0);
+            // 1ms short of the window: still the old window, no reset
+            let second: AllowedFixedWindowRequest = bucket.is_allowed(now + Duration::from_millis(999));
+            assert_eq!(second.allowed, false);
+            assert_eq!(second.remaining_tokens, 0);
 
-            thread::sleep(Duration::from_millis(500));
-
-            let response1: AllowedFixedWindowRequest = bucket.is_allowed();
-            assert_eq!(response1.allowed, false);
-            assert_eq!(response1.remaining_tokens, 0);
-
-            thread::sleep(Duration::from_millis(500));
-
-            let response2: AllowedFixedWindowRequest = bucket.is_allowed();
-            assert_eq!(response2.allowed, true);
-            assert_eq!(response2.remaining_tokens, 1);
+            // exactly on the boundary: the window is inclusive, so this resets
+            let third: AllowedFixedWindowRequest = bucket.is_allowed(now + Duration::from_millis(1000));
+            assert_eq!(third.allowed, true);
+            assert_eq!(third.remaining_tokens, 1);
         }
 
         #[test]
         fn should_deny_when_window_has_not_elapsed() {
-            let mut bucket = FixedWindow::new(2, WindowUnit::Minutes);
-            bucket.is_allowed();
-            let response: AllowedFixedWindowRequest = bucket.is_allowed();
+            let now = Instant::now();
+            let mut bucket = FixedWindow::new(2, WindowUnit::Minutes, now);
+            bucket.is_allowed(now);
+            let first: AllowedFixedWindowRequest = bucket.is_allowed(now);
+            assert_eq!(first.allowed, true);
+            assert_eq!(first.remaining_tokens, 0);
 
-            assert_eq!(response.allowed, true);
-            assert_eq!(response.remaining_tokens, 0);
-
-            thread::sleep(Duration::from_secs(1));
-
-            let response1: AllowedFixedWindowRequest = bucket.is_allowed();
-            assert_eq!(response1.allowed, false);
-            assert_eq!(response1.remaining_tokens, 0);
+            let second: AllowedFixedWindowRequest = bucket.is_allowed(now + Duration::from_secs(1));
+            assert_eq!(second.allowed, false);
+            assert_eq!(second.remaining_tokens, 0);
         }
 
         #[test]
         fn should_not_lose_partial_units_between_window_elapses() {
-            let mut bucket = FixedWindow::new(2, WindowUnit::Seconds);
-            bucket.is_allowed();
-            bucket.is_allowed();
+            let now = Instant::now();
+            let mut bucket = FixedWindow::new(2, WindowUnit::Seconds, now);
+            bucket.is_allowed(now);
+            bucket.is_allowed(now);
+            // 1 whole window + 500ms: resets to 2, anchor advances to 1s — not to 1.5s
+            bucket.is_allowed(now + Duration::from_millis(1500));
 
-            thread::sleep(Duration::from_millis(1500));      // 1 whole window + 500ms
-
-            bucket.is_allowed();                             // resets to 2, anchor advances to 1s (not 1.5s)
-            let first = bucket.is_allowed();
+            let first = bucket.is_allowed(now + Duration::from_millis(1500));
             assert_eq!(first.allowed, true);
-            assert_eq!(first.remaining_tokens, 0);           // both of the reset window's tokens now spent
+            assert_eq!(first.remaining_tokens, 0);
 
-            thread::sleep(Duration::from_millis(600));       // 500ms carried + 600ms = past the 2s boundary
-
-            let second = bucket.is_allowed();
+            // 1100ms past the anchor at 1s, so the carried 500ms is what crosses the boundary
+            let second = bucket.is_allowed(now + Duration::from_millis(2100));
             assert_eq!(second.allowed, true);
-            assert_eq!(second.remaining_tokens, 1);          // reset to 2, 1 consumed — only reachable if the 500ms carried
+            assert_eq!(second.remaining_tokens, 1);
         }
 
+        #[test]
+        fn should_advance_the_anchor_by_the_full_unit_in_seconds() {
+            // Seconds tests can't see a missing "* in_seconds()" since it's a no-op there; Minutes can.
+            let now = Instant::now();
+            let mut bucket = FixedWindow::new(1, WindowUnit::Minutes, now);
+            bucket.is_allowed(now);
+
+            let reset = bucket.is_allowed(now + Duration::from_secs(60));
+            assert_eq!(reset.allowed, true);
+
+            // A buggy 1s-per-reset anchor (instead of 60s) would wrongly reset again here.
+            let after = bucket.is_allowed(now + Duration::from_secs(61));
+            assert_eq!(after.allowed, false);
+        }
     }
 
     mod concurrency {
@@ -167,14 +174,15 @@ mod tests {
 
         #[test]
         fn should_enforce_limit_under_concurrent_access() {
-            let bucket = Mutex::new(FixedWindow::new(3, WindowUnit::Minutes));
+            let now = Instant::now();
+            let bucket = Mutex::new(FixedWindow::new(3, WindowUnit::Minutes, now));
 
             let requests: Vec<_> = std::thread::scope(|scope| {
                 let handles: Vec<_> = (0..4)
                     .map(|_| {
                         scope.spawn(|| {
                             let mut data = bucket.lock().unwrap();
-                            data.is_allowed()
+                            data.is_allowed(now)
                         })
                     })
                     .collect();

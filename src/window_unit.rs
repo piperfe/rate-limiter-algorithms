@@ -1,3 +1,4 @@
+use std::time::Duration;
 use serde::Deserialize;
 
 //TODO enum is serde library coupled -> decouple using DTO strategy
@@ -19,8 +20,8 @@ impl WindowUnit {
         }
     }
 
-    pub fn elapsed_units(self, elapsed_seconds: u64) -> u64 {
-        elapsed_seconds / self.in_seconds()
+    pub fn elapsed_time_units(self, elapsed: Duration) -> u64 {
+        elapsed.as_secs() / self.in_seconds()
     }
 }
 
@@ -57,22 +58,27 @@ mod tests {
 
         #[test]
         fn should_count_only_whole_units() {
-            assert_eq!(WindowUnit::Minutes.elapsed_units(59), 0);
-            assert_eq!(WindowUnit::Minutes.elapsed_units(60), 1);
-            assert_eq!(WindowUnit::Minutes.elapsed_units(119), 1);
-            assert_eq!(WindowUnit::Minutes.elapsed_units(120), 2);
+            assert_eq!(WindowUnit::Minutes.elapsed_time_units(Duration::from_secs(59)), 0);
+            assert_eq!(WindowUnit::Minutes.elapsed_time_units(Duration::from_secs(60)), 1);
+            assert_eq!(WindowUnit::Minutes.elapsed_time_units(Duration::from_secs(119)), 1);
+            assert_eq!(WindowUnit::Minutes.elapsed_time_units(Duration::from_secs(120)), 2);
         }
 
         #[test]
         fn should_discard_the_remainder_of_a_partial_unit() {
-            assert_eq!(WindowUnit::Hours.elapsed_units(3599), 0);
-            assert_eq!(WindowUnit::Days.elapsed_units(86399), 0);
+            assert_eq!(WindowUnit::Hours.elapsed_time_units(Duration::from_secs(3599)), 0);
+            assert_eq!(WindowUnit::Days.elapsed_time_units(Duration::from_secs(86399)), 0);
+        }
+
+        #[test]
+        fn should_discard_sub_second_precision() {
+            assert_eq!(WindowUnit::Seconds.elapsed_time_units(Duration::from_millis(999)), 0);
+            assert_eq!(WindowUnit::Seconds.elapsed_time_units(Duration::from_millis(1999)), 1);
         }
 
         #[test]
         fn should_count_every_second_when_unit_is_seconds() {
-            assert_eq!(WindowUnit::Seconds.elapsed_units(0), 0);
-            assert_eq!(WindowUnit::Seconds.elapsed_units(7), 7);
+            assert_eq!(WindowUnit::Seconds.elapsed_time_units(Duration::from_secs(7)), 7);
         }
     }
 }
